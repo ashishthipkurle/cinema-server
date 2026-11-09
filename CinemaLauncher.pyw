@@ -132,7 +132,7 @@ def make_desktop_shortcut():
         + (f"$s.Arguments = '{arguments}'; " if arguments else "")
         + f"$s.WorkingDirectory = '{work_dir}'; "
         + (f"$s.IconLocation = '{ico}'; " if ico else "")
-        + f"$s.Description = 'Cinema Streaming Server for iPad & PC'; "
+        + f"$s.Description = 'Cinema Streaming Server for iPad, PC & Mobile'; "
         f"$s.Save()"
     )
     try:

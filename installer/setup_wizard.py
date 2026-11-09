@@ -43,7 +43,7 @@ def get_default_install_dir():
     return os.path.join(user_prof, "Cinema") if user_prof else r"C:\Cinema"
 
 
-def create_shortcut(target_exe, lnk_path, icon_path=None, description="Cinema Streaming Server for iPad & PC"):
+def create_shortcut(target_exe, lnk_path, icon_path=None, description="Cinema Streaming Server for iPad, PC & Mobile"):
     target_exe = Path(target_exe).resolve()
     lnk_path = Path(lnk_path).resolve()
     lnk_path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +133,7 @@ class CinemaSetupWizard:
 
         subtitle_lbl = tk.Label(
             header,
-            text="Install Cinema Server to stream movies & anime to iPad, iPhone & PC.",
+            text="Install Cinema Server to stream movies & anime to iPad, PC & Mobile.",
             font=("Segoe UI", 10),
             fg=self.c_muted,
             bg=self.c_bg,

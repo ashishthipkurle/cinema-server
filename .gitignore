@@ -1,0 +1,59 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+*.spec
+
+# Windows standalone executables & installers (distribute via GitHub Releases)
+*.exe
+*.dll
+*.msi
+
+# FFmpeg distribution folder (binaries exceed GitHub 100MB file limit)
+ffmpeg/
+
+# Transcoded HLS streaming segments and runtime caches
+.hls/
+*.ts
+*.m3u8
+metadata_cache.json
+
+# Local user configuration & runtime logs
+.launcher_config.json
+*.bak
+*.log
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Edge profile data & browser caches
+edge_profile/
+SingletonLock
+SingletonCookie
+SingletonSocket
+
+# Operating system files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# IDE & Editor folders
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace

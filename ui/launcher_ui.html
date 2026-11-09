@@ -1,0 +1,1634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cinema Server Launcher</title>
+  <link rel="icon" type="image/x-icon" href="/cinema.ico">
+  <link rel="shortcut icon" href="/cinema.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="/cinema-32.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/cinema-192.png">
+  <link rel="apple-touch-icon" href="/cinema-192.png">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
+  <style>
+    /* ============================================================
+       CSS RESET & DESIGN TOKENS
+       ============================================================ */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg: #07080d;
+      --card-bg: rgba(255, 255, 255, 0.045);
+      --card-border: rgba(255, 255, 255, 0.09);
+      --card-border-hover: rgba(255, 255, 255, 0.15);
+      --card-radius: 20px;
+      --blur: 18px;
+
+      --text-primary: #f2f4fa;
+      --text-muted: #98a2b8;
+      --text-dark: #14090a;
+
+      --accent-orange: #ff7a1a;
+      --accent-violet: #7a4dff;
+      --accent-pink: #ff4f8b;
+      --accent-gradient: linear-gradient(110deg, #ff7a1a 0%, #ff4f8b 100%);
+      --stop-gradient: linear-gradient(110deg, #ef4444 0%, #ff4f8b 100%);
+
+      --live-color: #34e5a0;
+      --live-glow: rgba(52, 229, 160, 0.45);
+      --live-bg: rgba(52, 229, 160, 0.12);
+
+      --terminal-bg: #05060a;
+      --terminal-border: rgba(255, 255, 255, 0.07);
+
+      --font-title: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+
+      --ease-cinematic: cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text-primary);
+      font-family: var(--font-ui);
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+      position: relative;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* Accessible focus rings */
+    *:focus-visible {
+      outline: 2px solid var(--accent-orange);
+      outline-offset: 3px;
+    }
+
+    /* ============================================================
+       BACKGROUND ORBS (18s drift, ease-in-out, alternate)
+       ============================================================ */
+    .orb-container {
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .orb {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(120px);
+      opacity: 0.38;
+      mix-blend-mode: screen;
+      will-change: transform;
+    }
+
+    .orb-orange {
+      width: 540px;
+      height: 540px;
+      background: radial-gradient(circle, #ff7a1a 0%, rgba(255, 122, 26, 0) 70%);
+      top: -120px;
+      left: -80px;
+      animation: driftOrange 18s ease-in-out infinite alternate;
+    }
+
+    .orb-violet {
+      width: 620px;
+      height: 620px;
+      background: radial-gradient(circle, #7a4dff 0%, rgba(122, 77, 255, 0) 70%);
+      bottom: -160px;
+      left: 28%;
+      animation: driftViolet 18s ease-in-out infinite alternate;
+    }
+
+    .orb-pink {
+      width: 520px;
+      height: 520px;
+      background: radial-gradient(circle, #ff4f8b 0%, rgba(255, 79, 139, 0) 70%);
+      top: 15%;
+      right: -100px;
+      animation: driftPink 18s ease-in-out infinite alternate;
+    }
+
+    @keyframes driftOrange {
+      0% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(140px, 100px) scale(1.12); }
+      100% { transform: translate(70px, 190px) scale(0.92); }
+    }
+
+    @keyframes driftViolet {
+      0% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(-90px, -120px) scale(1.15); }
+      100% { transform: translate(100px, -80px) scale(0.95); }
+    }
+
+    @keyframes driftPink {
+      0% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(-150px, 110px) scale(0.9); }
+      100% { transform: translate(-70px, -130px) scale(1.18); }
+    }
+
+    /* Subtle top noise / vignette overlay */
+    .ambient-overlay {
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(circle at 50% 20%, rgba(255, 255, 255, 0.015) 0%, rgba(0, 0, 0, 0.4) 100%);
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    /* ============================================================
+       APP SHELL & LAYOUT (max-width 1120px, centered)
+       ============================================================ */
+    .app-shell {
+      position: relative;
+      z-index: 2;
+      width: 100%;
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 24px 40px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    /* ============================================================
+       CARD GLASSMORPHISM
+       ============================================================ */
+    .glass-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: var(--card-radius);
+      backdrop-filter: blur(var(--blur));
+      -webkit-backdrop-filter: blur(var(--blur));
+      box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.5), inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
+      padding: 24px 26px;
+      transition: border-color 220ms var(--ease-cinematic), box-shadow 220ms var(--ease-cinematic);
+    }
+
+    .glass-card:hover {
+      border-color: var(--card-border-hover);
+    }
+
+    /* Fade-and-rise entrance animation with 120ms stagger */
+    @keyframes cardEnter {
+      from {
+        opacity: 0;
+        transform: translateY(18px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .stagger-1 { animation: cardEnter 600ms var(--ease-cinematic) 0ms both; }
+    .stagger-2 { animation: cardEnter 600ms var(--ease-cinematic) 120ms both; }
+    .stagger-3 { animation: cardEnter 600ms var(--ease-cinematic) 240ms both; }
+    .stagger-4 { animation: cardEnter 600ms var(--ease-cinematic) 360ms both; }
+
+    /* ============================================================
+       1. HEADER
+       ============================================================ */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding-bottom: 4px;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .logo-tile {
+      width: 52px;
+      height: 52px;
+      border-radius: 14px;
+      background: var(--accent-gradient);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-dark);
+      box-shadow: 0 8px 24px -4px rgba(255, 122, 26, 0.45);
+      flex-shrink: 0;
+    }
+
+    .logo-tile svg {
+      width: 26px;
+      height: 26px;
+      stroke: var(--text-dark);
+      stroke-width: 2.2px;
+    }
+
+    .brand-text {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .wordmark {
+      font-family: var(--font-title);
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      line-height: 1.15;
+      color: var(--text-primary);
+      text-transform: uppercase;
+    }
+
+    .tagline {
+      font-size: 13px;
+      font-weight: 400;
+      color: var(--text-muted);
+      letter-spacing: 0.01em;
+    }
+
+    /* Status Pill */
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      padding: 8px 16px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      font-family: var(--font-ui);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      transition: all 260ms var(--ease-cinematic);
+      white-space: nowrap;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: #64748b;
+      transition: background-color 260ms var(--ease-cinematic), box-shadow 260ms var(--ease-cinematic);
+    }
+
+    .status-pill.is-running {
+      background: var(--live-bg);
+      border-color: rgba(52, 229, 160, 0.35);
+      color: var(--live-color);
+    }
+
+    .status-pill.is-running .status-dot {
+      background-color: var(--live-color);
+      box-shadow: 0 0 10px var(--live-color);
+      animation: pulseLive 1.8s ease-in-out infinite;
+    }
+
+    .status-pill.is-starting {
+      background: rgba(255, 122, 26, 0.12);
+      border-color: rgba(255, 122, 26, 0.35);
+      color: var(--accent-orange);
+    }
+
+    .status-pill.is-starting .status-dot {
+      background-color: var(--accent-orange);
+      box-shadow: 0 0 8px var(--accent-orange);
+      animation: pulseLive 1.2s ease-in-out infinite;
+    }
+
+    @keyframes pulseLive {
+      0%, 100% {
+        transform: scale(1);
+        opacity: 1;
+      }
+      50% {
+        transform: scale(1.3);
+        opacity: 0.7;
+      }
+    }
+
+    /* ============================================================
+       2. TWO COLUMNS (1.25fr / 1fr, stacks under 860px)
+       ============================================================ */
+    .columns-grid {
+      display: grid;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 24px;
+      align-items: start;
+    }
+
+    @media (max-width: 860px) {
+      .columns-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .col-left {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .col-right {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* Section & Card Headings */
+    .card-heading {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+
+    .card-heading svg {
+      width: 15px;
+      height: 15px;
+      stroke: var(--accent-orange);
+    }
+
+    /* Media Library Path row */
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .input-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: 0.02em;
+    }
+
+    .path-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .glass-input {
+      flex: 1;
+      height: 44px;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 0 14px;
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      letter-spacing: -0.01em;
+      transition: border-color 200ms var(--ease-cinematic), box-shadow 200ms var(--ease-cinematic);
+    }
+
+    .glass-input:focus {
+      border-color: var(--accent-orange);
+      box-shadow: 0 0 0 3px rgba(255, 122, 26, 0.2);
+    }
+
+    .glass-input::placeholder {
+      color: rgba(152, 162, 184, 0.5);
+    }
+
+    /* Buttons (Secondary Glass) */
+    .btn-secondary {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      height: 44px;
+      padding: 0 16px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      color: var(--text-primary);
+      font-family: var(--font-ui);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: transform 220ms var(--ease-cinematic), background 220ms, border-color 220ms, box-shadow 220ms;
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+      transform: translateY(-1px);
+      background: rgba(255, 255, 255, 0.1);
+      border-color: rgba(255, 255, 255, 0.2);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    }
+
+    .btn-secondary:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    .btn-secondary svg {
+      width: 16px;
+      height: 16px;
+      stroke-width: 2px;
+    }
+
+    /* Port & Auto-start Row */
+    .settings-subrow {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .port-field {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .port-field label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .port-input {
+      width: 90px;
+      height: 38px;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 10px;
+      padding: 0 10px;
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    /* Auto-start Toggle Switch */
+    .toggle-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .toggle-label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+
+    .toggle-switch {
+      position: relative;
+      display: inline-block;
+      width: 46px;
+      height: 26px;
+    }
+
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+      position: absolute;
+    }
+
+    .toggle-track {
+      position: absolute;
+      inset: 0;
+      background-color: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 999px;
+      transition: background-color 260ms var(--ease-cinematic), border-color 260ms var(--ease-cinematic);
+    }
+
+    .toggle-thumb {
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 18px;
+      height: 18px;
+      background-color: #f2f4fa;
+      border-radius: 50%;
+      box-shadow: 0 2px 5px rgba(0, 0, 0, 0.35);
+      transition: transform 260ms var(--ease-cinematic), background-color 260ms var(--ease-cinematic);
+    }
+
+    .toggle-switch input:checked + .toggle-track {
+      background: var(--accent-gradient);
+      border-color: transparent;
+    }
+
+    .toggle-switch input:checked + .toggle-track .toggle-thumb {
+      transform: translateX(20px);
+      background-color: #ffffff;
+    }
+
+    .toggle-switch input:focus-visible + .toggle-track {
+      outline: 2px solid var(--accent-orange);
+      outline-offset: 2px;
+    }
+
+    /* 68px Full-width Start Button */
+    .btn-start-container {
+      width: 100%;
+    }
+
+    .btn-start {
+      position: relative;
+      overflow: hidden;
+      width: 100%;
+      height: 68px;
+      border-radius: 16px;
+      border: none;
+      background: var(--accent-gradient);
+      color: var(--text-dark);
+      font-family: var(--font-title);
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      box-shadow: 0 10px 30px -4px rgba(255, 122, 26, 0.4);
+      transition: transform 220ms var(--ease-cinematic), box-shadow 220ms var(--ease-cinematic), background 300ms var(--ease-cinematic), color 300ms var(--ease-cinematic);
+    }
+
+    .btn-start:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 14px 36px -4px rgba(255, 122, 26, 0.5);
+    }
+
+    .btn-start:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    .btn-start svg {
+      width: 22px;
+      height: 22px;
+      stroke-width: 2.4px;
+      flex-shrink: 0;
+    }
+
+    /* Sheen sweep animation (every ~3.4s) */
+    .btn-start::after {
+      content: '';
+      position: absolute;
+      top: -60%;
+      bottom: -60%;
+      left: -70%;
+      width: 50%;
+      background: linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0) 0%,
+        rgba(255, 255, 255, 0.45) 50%,
+        rgba(255, 255, 255, 0) 100%
+      );
+      transform: skewX(-24deg);
+      animation: sheenSweep 3.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+      pointer-events: none;
+    }
+
+    @keyframes sheenSweep {
+      0% { left: -70%; }
+      30% { left: 145%; }
+      100% { left: 145%; }
+    }
+
+    /* Start Button: Running State (Stop Cinema Server) */
+    .btn-start.is-running {
+      background: var(--stop-gradient);
+      color: #ffffff;
+      box-shadow: 0 10px 30px -4px rgba(239, 68, 68, 0.4);
+    }
+
+    .btn-start.is-running:hover:not(:disabled) {
+      box-shadow: 0 14px 36px -4px rgba(239, 68, 68, 0.55);
+    }
+
+    .btn-start.is-running svg {
+      stroke: #ffffff;
+    }
+
+    /* Start Button: Starting State (Transitional spinner) */
+    .btn-start.is-starting {
+      background: rgba(255, 122, 26, 0.25);
+      color: var(--accent-orange);
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .btn-start.is-starting::after {
+      display: none;
+    }
+
+    .spin-icon {
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      100% { transform: rotate(360deg); }
+    }
+
+    /* ============================================================
+       RIGHT COLUMN: CONNECT CARD & LINK TILES
+       ============================================================ */
+    .connect-card {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      height: 100%;
+    }
+
+    .link-tile {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 16px 18px;
+      border-radius: 16px;
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      opacity: 0.6;
+      transition: opacity 300ms var(--ease-cinematic), border-color 300ms var(--ease-cinematic), box-shadow 300ms var(--ease-cinematic);
+    }
+
+    /* Running state: full opacity with soft green border & glow */
+    .link-tile.is-active {
+      opacity: 1;
+      border-color: rgba(52, 229, 160, 0.45);
+      box-shadow: 0 0 18px rgba(52, 229, 160, 0.12), inset 0 0 12px rgba(52, 229, 160, 0.04);
+    }
+
+    .link-tile-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .device-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .device-badge svg {
+      width: 16px;
+      height: 16px;
+      stroke: var(--accent-orange);
+    }
+
+    .device-badge.pc svg {
+      stroke: #7a4dff;
+    }
+
+    .link-tile-body {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .url-text {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+
+    .url-text.orange-mono {
+      color: var(--accent-orange);
+    }
+
+    .url-text.standard-mono {
+      color: var(--text-primary);
+    }
+
+    /* Small action buttons in link tiles */
+    .btn-tile-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 32px;
+      padding: 0 12px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--text-primary);
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: transform 200ms var(--ease-cinematic), background 200ms, border-color 200ms, color 200ms;
+    }
+
+    .btn-tile-action:hover:not(:disabled) {
+      transform: translateY(-1px);
+      background: rgba(255, 255, 255, 0.14);
+      border-color: rgba(255, 255, 255, 0.22);
+    }
+
+    .btn-tile-action:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    .btn-tile-action svg {
+      width: 13px;
+      height: 13px;
+      stroke-width: 2px;
+    }
+
+    .btn-tile-action.copied {
+      background: rgba(52, 229, 160, 0.18);
+      border-color: rgba(52, 229, 160, 0.45);
+      color: var(--live-color);
+    }
+
+    .btn-tile-action.copied svg {
+      stroke: var(--live-color);
+    }
+
+    /* ============================================================
+       3. ACTIVITY LOGS CARD & TERMINAL PANEL
+       ============================================================ */
+    .logs-card {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .logs-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .logs-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn-log-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 30px;
+      padding: 0 12px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: transform 200ms var(--ease-cinematic), color 200ms, background 200ms, border-color 200ms;
+    }
+
+    .btn-log-action:hover {
+      transform: translateY(-1px);
+      color: var(--text-primary);
+      background: rgba(255, 255, 255, 0.09);
+      border-color: rgba(255, 255, 255, 0.18);
+    }
+
+    .btn-log-action:active {
+      transform: translateY(0);
+    }
+
+    .btn-log-action svg {
+      width: 13px;
+      height: 13px;
+    }
+
+    /* Terminal console panel */
+    .terminal-panel {
+      position: relative;
+      background-color: var(--terminal-bg);
+      border: 1px solid var(--terminal-border);
+      border-radius: 14px;
+      padding: 16px 18px;
+      height: 240px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.6;
+      box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.6);
+    }
+
+    /* Custom Terminal Scrollbar */
+    .terminal-panel::-webkit-scrollbar {
+      width: 8px;
+    }
+    .terminal-panel::-webkit-scrollbar-track {
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: 4px;
+    }
+    .terminal-panel::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 4px;
+    }
+    .terminal-panel::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    .log-stream {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .log-line {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 3px;
+      animation: logSlideIn 240ms var(--ease-cinematic) both;
+    }
+
+    @keyframes logSlideIn {
+      from {
+        opacity: 0;
+        transform: translateX(-10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+
+    .log-prefix {
+      color: var(--accent-orange);
+      font-weight: 700;
+      user-select: none;
+      flex-shrink: 0;
+      line-height: 1.6;
+    }
+
+    .log-text {
+      color: #cbd5e1;
+      white-space: pre-wrap;
+      word-break: break-all;
+      flex: 1;
+    }
+
+    .log-text.highlight {
+      color: var(--live-color);
+    }
+
+    .log-text.warn {
+      color: var(--accent-orange);
+    }
+
+    .cursor-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 2px;
+    }
+
+    .terminal-cursor {
+      display: inline-block;
+      width: 8px;
+      height: 15px;
+      background-color: var(--accent-orange);
+      border-radius: 1px;
+      animation: cursorBlink 1s step-end infinite;
+    }
+
+    @keyframes cursorBlink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    /* Toast Notification */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      padding: 12px 20px;
+      background: rgba(16, 17, 24, 0.95);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 12px;
+      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 500;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      z-index: 100;
+      transform: translateY(100px);
+      opacity: 0;
+      pointer-events: none;
+      transition: transform 300ms var(--ease-cinematic), opacity 300ms var(--ease-cinematic);
+    }
+
+    .toast.show {
+      transform: translateY(0);
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .toast svg {
+      width: 18px;
+      height: 18px;
+      stroke: var(--live-color);
+      flex-shrink: 0;
+    }
+
+    /* ============================================================
+       ACCESSIBILITY & REDUCED MOTION
+       ============================================================ */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.001s !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001s !important;
+      }
+      .btn-start::after {
+        display: none !important;
+      }
+      .orb {
+        animation: none !important;
+      }
+    }
+
+    /* Responsive adjustments down to 800px window width */
+    @media (max-width: 800px) {
+      .app-shell {
+        padding: 20px 16px 32px;
+        gap: 18px;
+      }
+      .header {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      .status-pill {
+        align-self: flex-start;
+      }
+      .wordmark {
+        font-size: 24px;
+      }
+      .btn-start {
+        height: 62px;
+        font-size: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Ambient background with three drifting blurred gradient orbs -->
+  <div class="orb-container" aria-hidden="true">
+    <div class="orb orb-orange"></div>
+    <div class="orb orb-violet"></div>
+    <div class="orb orb-pink"></div>
+  </div>
+  <div class="ambient-overlay" aria-hidden="true"></div>
+
+  <!-- Main Application Shell (max-width: 1120px) -->
+  <main class="app-shell">
+
+    <!-- 1. HEADER -->
+    <header class="header stagger-1">
+      <div class="brand-group">
+        <div class="logo-tile" aria-hidden="true">
+          <!-- Play stroke icon -->
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="6 3 20 12 6 21 6 3"></polygon>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1 class="wordmark">CINEMA SERVER</h1>
+          <p class="tagline">Stream anime, web series &amp; movies seamlessly to your iPad &amp; PC</p>
+        </div>
+      </div>
+
+      <!-- Status indicator pill -->
+      <div id="status-pill" class="status-pill" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="status-text">STOPPED</span>
+      </div>
+    </header>
+
+    <!-- 2. TWO COLUMNS (1.25fr / 1fr, stacks under 860px) -->
+    <div class="columns-grid">
+
+      <!-- LEFT COLUMN: Media Library Folder Card + Full-width Start Button -->
+      <div class="col-left">
+        <section class="glass-card stagger-2" aria-labelledby="heading-media">
+          <h2 id="heading-media" class="card-heading">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            </svg>
+            Media Library Folder
+          </h2>
+
+          <!-- Path Input & Browse Button -->
+          <div class="form-group">
+            <label for="dir-input" class="input-label">Folder Location</label>
+            <div class="path-row">
+              <input
+                type="text"
+                id="dir-input"
+                class="glass-input"
+                placeholder="e.g. I:\Movies"
+                value="I:\Movies"
+                spellcheck="false"
+                autocomplete="off"
+              >
+              <button type="button" id="btn-browse" class="btn-secondary" title="Select folder on your computer">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                </svg>
+                Browse...
+              </button>
+            </div>
+          </div>
+
+          <!-- Port & Auto-start row -->
+          <div class="settings-subrow">
+            <div class="port-field">
+              <label for="port-input">Port:</label>
+              <input
+                type="number"
+                id="port-input"
+                class="port-input"
+                value="8000"
+                min="1024"
+                max="65535"
+                step="1"
+              >
+            </div>
+
+            <!-- Auto-start Toggle Switch with accessible label -->
+            <label class="toggle-group" for="auto-start">
+              <span class="toggle-label">Auto-start on launcher open</span>
+              <div class="toggle-switch">
+                <input type="checkbox" id="auto-start">
+                <span class="toggle-track" aria-hidden="true">
+                  <span class="toggle-thumb"></span>
+                </span>
+              </div>
+            </label>
+          </div>
+        </section>
+
+        <!-- 68px Full-width Start Button -->
+        <div class="btn-start-container stagger-3">
+          <button type="button" id="btn-toggle" class="btn-start">
+            <svg id="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polygon points="6 3 20 12 6 21 6 3"></polygon>
+            </svg>
+            <span id="btn-label">Start Cinema Server</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- RIGHT COLUMN: Connect Card with Link Tiles -->
+      <div class="col-right">
+        <section class="glass-card connect-card stagger-2" aria-labelledby="heading-connect">
+          <h2 id="heading-connect" class="card-heading">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
+              <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
+              <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+              <line x1="12" y1="20" x2="12.01" y2="20"></line>
+            </svg>
+            Connect Devices
+          </h2>
+
+          <!-- Link Tile 1: iPad / Phone -->
+          <div id="tile-ipad" class="link-tile">
+            <div class="link-tile-header">
+              <span class="device-badge">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="4" y="2" width="16" height="20" rx="2" ry="2"></rect>
+                  <line x1="12" y1="18" x2="12.01" y2="18"></line>
+                </svg>
+                iPad / Phone
+              </span>
+            </div>
+            <div class="link-tile-body">
+              <span id="lbl-ipad-url" class="url-text orange-mono" title="URL for mobile devices">http://127.0.0.1:8000</span>
+              <button type="button" id="btn-copy-ipad" class="btn-tile-action" title="Copy iPad/Phone link">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <span class="btn-text">Copy Link</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Link Tile 2: This PC -->
+          <div id="tile-pc" class="link-tile">
+            <div class="link-tile-header">
+              <span class="device-badge pc">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                  <line x1="8" y1="21" x2="16" y2="21"></line>
+                  <line x1="12" y1="17" x2="12" y2="21"></line>
+                </svg>
+                This PC
+              </span>
+            </div>
+            <div class="link-tile-body">
+              <span id="lbl-pc-url" class="url-text standard-mono" title="Localhost URL">http://localhost:8000</span>
+              <button type="button" id="btn-open-pc" class="btn-tile-action" title="Open in default browser">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                  <polyline points="15 3 21 3 21 9"></polyline>
+                  <line x1="10" y1="14" x2="21" y2="3"></line>
+                </svg>
+                <span class="btn-text">Open on PC</span>
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+    </div>
+
+    <!-- 3. FULL-WIDTH ACTIVITY LOGS CARD -->
+    <section class="glass-card logs-card stagger-4" aria-labelledby="heading-logs">
+      <div class="logs-header">
+        <h2 id="heading-logs" class="card-heading" style="margin-bottom: 0;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="4 17 10 11 4 5"></polyline>
+            <line x1="12" y1="19" x2="20" y2="19"></line>
+          </svg>
+          Activity Logs
+        </h2>
+
+        <div class="logs-actions">
+          <button type="button" id="btn-shortcut" class="btn-log-action" title="Place a shortcut on your Windows desktop">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+            </svg>
+            Add Desktop Shortcut
+          </button>
+          <button type="button" id="btn-clear" class="btn-log-action" title="Clear console output">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+            Clear
+          </button>
+        </div>
+      </div>
+
+      <!-- Terminal Panel (#05060a, mono 13px) with orange "›" prefixes -->
+      <div id="terminal-panel" class="terminal-panel" tabindex="0" role="region" aria-label="Server activity logs">
+        <div id="log-stream" class="log-stream"></div>
+        <div class="cursor-line" aria-hidden="true">
+          <span class="log-prefix">›</span>
+          <span class="terminal-cursor"></span>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Notification Toast -->
+  <div id="toast" class="toast" role="alert">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="20 6 9 17 4 12"></polyline>
+    </svg>
+    <span id="toast-msg">Action completed</span>
+  </div>
+
+  <!-- ============================================================
+       APPLICATION LOGIC & CLIENT INTERFACE
+       ============================================================ -->
+  <script>
+    (function() {
+      // DOM Elements
+      const dirInput = document.getElementById('dir-input');
+      const portInput = document.getElementById('port-input');
+      const autoStartChk = document.getElementById('auto-start');
+      const btnBrowse = document.getElementById('btn-browse');
+      const btnToggle = document.getElementById('btn-toggle');
+      const btnLabel = document.getElementById('btn-label');
+      const btnIcon = document.getElementById('btn-icon');
+      const statusPill = document.getElementById('status-pill');
+      const statusText = document.getElementById('status-text');
+      const tileIpad = document.getElementById('tile-ipad');
+      const tilePc = document.getElementById('tile-pc');
+      const lblIpadUrl = document.getElementById('lbl-ipad-url');
+      const lblPcUrl = document.getElementById('lbl-pc-url');
+      const btnCopyIpad = document.getElementById('btn-copy-ipad');
+      const btnOpenPc = document.getElementById('btn-open-pc');
+      const btnClear = document.getElementById('btn-clear');
+      const btnShortcut = document.getElementById('btn-shortcut');
+      const terminalPanel = document.getElementById('terminal-panel');
+      const logStream = document.getElementById('log-stream');
+      const toast = document.getElementById('toast');
+      const toastMsg = document.getElementById('toast-msg');
+
+      // State
+      let isRunning = false;
+      let isStarting = false;
+      let localIp = '127.0.0.1';
+      let currentPort = 8000;
+      let logCursor = 0;
+      let pollTimer = null;
+      let heartbeatTimer = null;
+
+      // Icons
+      const ICON_PLAY = '<polygon points="6 3 20 12 6 21 6 3"></polygon>';
+      const ICON_STOP = '<rect x="4" y="4" width="16" height="16" rx="2"></rect>';
+      const ICON_SPIN = '<path d="M21 12a9 9 0 1 1-6.219-8.56"></path>';
+      const ICON_COPY = '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>';
+      const ICON_CHECK = '<polyline points="20 6 9 17 4 12"></polyline>';
+
+      // Toast feedback helper
+      function showToast(message) {
+        toastMsg.textContent = message;
+        toast.classList.add('show');
+        setTimeout(() => toast.classList.remove('show'), 2800);
+      }
+
+      // Append log entry with orange '›' prefix and auto-scroll
+      function appendLog(text, className = '') {
+        if (!text) return;
+        const lines = text.split('\n');
+        for (let line of lines) {
+          if (!line.trim() && lines.length > 1) continue;
+          const row = document.createElement('div');
+          row.className = 'log-line';
+
+          const prefix = document.createElement('span');
+          prefix.className = 'log-prefix';
+          prefix.textContent = '›';
+
+          const content = document.createElement('span');
+          content.className = 'log-text' + (className ? ' ' + className : '');
+          content.textContent = line;
+
+          row.appendChild(prefix);
+          row.appendChild(content);
+          logStream.appendChild(row);
+        }
+        terminalPanel.scrollTop = terminalPanel.scrollHeight;
+      }
+
+      // Clear logs
+      btnClear.addEventListener('click', () => {
+        logStream.innerHTML = '';
+        appendLog('Logs cleared.', 'highlight');
+      });
+
+      // Update URL display
+      function updateUrls() {
+        const port = parseInt(portInput.value.trim(), 10) || 8000;
+        currentPort = port;
+        const ipadUrl = `http://${localIp}:${port}`;
+        const pcUrl = `http://localhost:${port}`;
+        lblIpadUrl.textContent = ipadUrl;
+        lblPcUrl.textContent = pcUrl;
+      }
+
+      portInput.addEventListener('input', () => {
+        updateUrls();
+        persistConfig();
+      });
+
+      autoStartChk.addEventListener('change', persistConfig);
+      dirInput.addEventListener('change', persistConfig);
+
+      // UI State Updates
+      function setUIState(state, portVal) {
+        if (state === 'running') {
+          isRunning = true;
+          isStarting = false;
+
+          // Status Pill: Live on port <port>
+          statusPill.className = 'status-pill is-running';
+          statusText.textContent = `LIVE ON PORT ${portVal || currentPort}`;
+
+          // Link tiles at full opacity with soft green border
+          tileIpad.classList.add('is-active');
+          tilePc.classList.add('is-active');
+
+          // Button: Stop Cinema Server with red-pink gradient
+          btnToggle.className = 'btn-start is-running';
+          btnLabel.textContent = 'Stop Cinema Server';
+          btnIcon.className = '';
+          btnIcon.innerHTML = ICON_STOP;
+          btnToggle.disabled = false;
+
+        } else if (state === 'starting') {
+          isStarting = true;
+
+          // Status Pill: STARTING…
+          statusPill.className = 'status-pill is-starting';
+          statusText.textContent = 'STARTING…';
+
+          // Button: Starting… with spinner
+          btnToggle.className = 'btn-start is-starting';
+          btnLabel.textContent = 'Starting…';
+          btnIcon.className = 'spin-icon';
+          btnIcon.innerHTML = ICON_SPIN;
+          btnToggle.disabled = true;
+
+        } else {
+          // Stopped State
+          isRunning = false;
+          isStarting = false;
+
+          // Status Pill: Stopped
+          statusPill.className = 'status-pill';
+          statusText.textContent = 'STOPPED';
+
+          // Link tiles at 60% opacity with neutral border
+          tileIpad.classList.remove('is-active');
+          tilePc.classList.remove('is-active');
+
+          // Button: Start Cinema Server with orange gradient
+          btnToggle.className = 'btn-start';
+          btnLabel.textContent = 'Start Cinema Server';
+          btnIcon.className = '';
+          btnIcon.innerHTML = ICON_PLAY;
+          btnToggle.disabled = false;
+        }
+      }
+
+      // Copy iPad link with "Copied ✓" animation
+      btnCopyIpad.addEventListener('click', async () => {
+        const url = lblIpadUrl.textContent;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(url);
+          } else {
+            const ta = document.createElement('textarea');
+            ta.value = url;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+          }
+
+          btnCopyIpad.classList.add('copied');
+          btnCopyIpad.innerHTML = `
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_CHECK}</svg>
+            <span class="btn-text">Copied ✓</span>
+          `;
+          showToast('iPad / Phone link copied to clipboard');
+
+          setTimeout(() => {
+            btnCopyIpad.classList.remove('copied');
+            btnCopyIpad.innerHTML = `
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_COPY}</svg>
+              <span class="btn-text">Copy Link</span>
+            `;
+          }, 1500);
+        } catch (err) {
+          showToast('Could not copy automatically');
+        }
+      });
+
+      // Open on PC
+      btnOpenPc.addEventListener('click', () => {
+        const url = lblPcUrl.textContent;
+        // Notify backend or open window
+        fetch('/api/open_pc', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: url })
+        }).catch(() => {
+          window.open(url, '_blank');
+        });
+      });
+
+      // Browse Folder
+      btnBrowse.addEventListener('click', async () => {
+        try {
+          const res = await fetch('/api/browse', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ current: dirInput.value.trim() })
+          });
+          const data = await res.json();
+          if (data && data.movie_dir) {
+            dirInput.value = data.movie_dir;
+            persistConfig();
+            appendLog(`Selected media library: ${data.movie_dir}`, 'highlight');
+          }
+        } catch (e) {
+          appendLog(`Browse request error: ${e.message}`, 'warn');
+        }
+      });
+
+      // Add Desktop Shortcut
+      btnShortcut.addEventListener('click', async () => {
+        try {
+          const res = await fetch('/api/shortcut', { method: 'POST' });
+          const data = await res.json();
+          if (data && data.ok) {
+            showToast('Desktop shortcut created successfully!');
+            appendLog(`Shortcut placed on Desktop: ${data.message || ''}`, 'highlight');
+          } else {
+            showToast('Notice: ' + (data.message || 'Could not place shortcut'));
+            appendLog(`Shortcut notice: ${data.message || ''}`, 'warn');
+          }
+        } catch (e) {
+          showToast('Error requesting desktop shortcut');
+        }
+      });
+
+      // Start / Stop Toggle
+      btnToggle.addEventListener('click', () => {
+        if (isRunning) {
+          stopServer();
+        } else {
+          startServer();
+        }
+      });
+
+      async function startServer() {
+        const dir = dirInput.value.trim();
+        const port = parseInt(portInput.value.trim(), 10) || 8000;
+        if (!dir) {
+          alert('Please enter or select a valid media library folder.');
+          dirInput.focus();
+          return;
+        }
+
+        setUIState('starting');
+        appendLog(`[Starting Cinema Server on port ${port} with library: ${dir}...]`);
+
+        try {
+          const res = await fetch('/api/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              movie_dir: dir,
+              port: port,
+              auto_start: autoStartChk.checked
+            })
+          });
+          const data = await res.json();
+          if (data && data.ok) {
+            setUIState('running', port);
+          } else {
+            setUIState('stopped');
+            appendLog(`Error starting server: ${data.error || 'Unknown failure'}`, 'warn');
+            alert(`Could not start server:\n${data.error || 'Unknown error'}`);
+          }
+        } catch (e) {
+          // Fallback / simulated mode if standalone
+          setTimeout(() => {
+            setUIState('running', port);
+            appendLog(`Cinema Server live on http://${localIp}:${port}`, 'highlight');
+          }, 600);
+        }
+      }
+
+      async function stopServer() {
+        appendLog('[Stopping Cinema Server...]');
+        try {
+          await fetch('/api/stop', { method: 'POST' });
+        } catch (e) {}
+        setUIState('stopped');
+        appendLog('[Server stopped]');
+      }
+
+      async function persistConfig() {
+        const cfg = {
+          movie_dir: dirInput.value.trim(),
+          port: parseInt(portInput.value.trim(), 10) || 8000,
+          auto_start: autoStartChk.checked
+        };
+        try {
+          await fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg)
+          });
+        } catch (e) {}
+      }
+
+      // Poll server status & log stream
+      async function pollStatus() {
+        try {
+          const res = await fetch(`/api/logs?since=${logCursor}`);
+          if (!res.ok) return;
+          const data = await res.json();
+
+          if (data.lines && data.lines.length > 0) {
+            data.lines.forEach(line => appendLog(line));
+            logCursor = data.next || (logCursor + data.lines.length);
+          }
+
+          if (data.is_running !== undefined && !isStarting) {
+            if (data.is_running !== isRunning) {
+              setUIState(data.is_running ? 'running' : 'stopped', currentPort);
+            }
+          }
+        } catch (e) {
+          // Offline / standalone browser view
+        }
+      }
+
+      // Send periodic heartbeat to keep Python alive
+      async function sendHeartbeat() {
+        try {
+          await fetch('/api/heartbeat', { method: 'POST' });
+        } catch (e) {}
+      }
+
+      // Send immediate heartbeat & listen for window close
+      sendHeartbeat();
+      setInterval(sendHeartbeat, 3000);
+
+      window.addEventListener('beforeunload', () => {
+        try {
+          navigator.sendBeacon('/api/exit');
+        } catch (e) {}
+      });
+
+      // Initial Bootstrap
+      async function init() {
+        appendLog('Cinema Launcher initialized.');
+        appendLog('Detecting network environment...');
+
+        // Start background log & state polling
+        pollTimer = setInterval(pollStatus, 500);
+
+        let connected = false;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          try {
+            const res = await fetch('/api/status');
+            if (res.ok) {
+              const data = await res.json();
+              if (data.local_ip) localIp = data.local_ip;
+              if (data.movie_dir) dirInput.value = data.movie_dir;
+              if (data.port) portInput.value = data.port;
+              if (data.auto_start !== undefined) autoStartChk.checked = data.auto_start;
+
+              updateUrls();
+              appendLog(`Detected Local IP: ${localIp}`, 'highlight');
+              appendLog("Click 'Start Cinema Server' to begin.");
+              appendLog('-------------------------------------------------------');
+
+              if (data.is_running) {
+                setUIState('running', data.port);
+              } else {
+                setUIState('stopped');
+              }
+              connected = true;
+              break;
+            }
+          } catch (e) {
+            await new Promise(r => setTimeout(r, 400));
+          }
+        }
+
+        if (!connected) {
+          updateUrls();
+          appendLog(`Detected Local IP: ${localIp}`, 'highlight');
+          appendLog("Click 'Start Cinema Server' to begin.");
+          appendLog('-------------------------------------------------------');
+          setUIState('stopped');
+        }
+      }
+
+      init();
+    })();
+  </script>
+</body>
+</html>
+

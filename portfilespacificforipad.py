@@ -19,6 +19,7 @@ import atexit
 import collections
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -47,10 +48,10 @@ except Exception:
 
 APP_NAME = "Cinema"
 
-MOVIE_DIR = Path(os.environ.get("MOVIE_DIR", r"I:\Movies\Movies"))
+MOVIE_DIR = Path(os.environ.get("MOVIE_DIR", r"I:\Movies" if Path(r"I:\Movies").is_dir() else r"I:\Movies\Movies"))
 PORT = int(os.environ.get("PORT", "8000"))
 
-SEGMENT_TIME = 4                # seconds per HLS segment (smaller = faster start)
+SEGMENT_TIME = 2                # seconds per HLS segment (smaller = faster start)
 BUFFER_AHEAD_SECONDS = 180      # pause ffmpeg when it is this far ahead of the player
 IDLE_TIMEOUT = 600              # stop a stream nobody has touched for this long (s)
 MAX_HEIGHT = 1080               # transcodes are scaled down to this height
@@ -94,9 +95,12 @@ def log(msg):
 # ============================================================
 
 def find_binary(name):
+    script_dir = Path(__file__).resolve().parent
     exe_dir = Path(sys.executable).parent
     meipass = Path(getattr(sys, "_MEIPASS", exe_dir))
     local = [
+        script_dir / "ffmpeg" / "bin" / f"{name}{EXE}",
+        script_dir / "ffmpeg" / f"{name}{EXE}",
         meipass / "ffmpeg" / "bin" / f"{name}{EXE}",
         meipass / f"{name}{EXE}",
         exe_dir / "ffmpeg" / "bin" / f"{name}{EXE}",
@@ -160,8 +164,8 @@ def run(cmd, timeout):
 
 SOFTWARE_ENCODER = (
     "libx264",
-    ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-     "-maxrate", "12M", "-bufsize", "24M", "-sc_threshold", "0"],
+    ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "23",
+     "-maxrate", "12M", "-bufsize", "24M", "-sc_threshold", "0", "-threads", "0"],
 )
 
 GPU_ENCODERS = [
@@ -813,8 +817,8 @@ def can_direct_play(path, meta, audio_index):
 
 
 def pick_video_mode(meta, start_time):
-    """'copy' = remux (no re-encode). Only from t=0: seeking into a copied stream is keyframe-inaccurate."""
-    if (start_time == 0 and meta.get("vcodec") == "h264"
+    """'copy' = remux (no re-encode). If H.264 video with yuv420p, stream copy is FAST and uses 0% CPU!"""
+    if (meta.get("vcodec") == "h264"
             and meta.get("pix_fmt") in ("yuv420p", "yuvj420p")
             and 0 < meta.get("height", 0) <= MAX_HEIGHT + 8
             and meta.get("bit_rate", 0) <= COPY_MAX_BITRATE):
@@ -850,8 +854,9 @@ class HLSJob:
         self.id = uuid.uuid4().hex
         self.sid, self.movie, self.rel = sid, movie, rel
         self.audio = resolve_audio(meta, audio_index)
-        self.start_time = int(start_time)
+        self.start_time = float(start_time)
         self.meta = meta
+        self.total_duration = float(meta.get("duration") or 0)
         self.mode = pick_video_mode(meta, self.start_time)
         self.dir = HLS_DIR / self.id
         self.playlist = self.dir / "index.m3u8"
@@ -861,12 +866,16 @@ class HLSJob:
         self.last_access = time.time()
         self.last_req = 0
         self.stderr_tail = collections.deque(maxlen=25)
+        self.lock = threading.Lock()
+        self.init_seg = int(self.start_time // SEGMENT_TIME)
 
     # ---- ffmpeg command -------------------------------------------------
     def build_cmd(self):
+        start_sec = self.start_time
+        seg_idx = self.init_seg
         cmd = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y"]
-        if self.start_time > 0:
-            cmd += ["-ss", str(self.start_time)]
+        if start_sec > 0:
+            cmd += ["-ss", f"{start_sec:.3f}"]
         cmd += ["-i", str(self.movie), "-map", "0:v:0"]
         if self.mode == "copy":
             cmd += ["-c:v", "copy"]
@@ -876,11 +885,13 @@ class HLSJob:
                 "-force_key_frames", f"expr:gte(t,n_forced*{SEGMENT_TIME})",
             ]
         cmd += ["-map", f"0:{self.audio}" if self.audio is not None else "0:a:0?",
-                "-c:a", "aac", "-b:a", "192k", "-ac", "2",
-                "-sn", "-dn", "-max_muxing_queue_size", "1024",
-                "-f", "hls", "-hls_time", str(SEGMENT_TIME),
-                # EVENT = "starts at the beginning, grows while encoding" (a plain
-                # playlist is treated as LIVE, and players jump to the end of it)
+                "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
+                "-threads", "0",
+                "-sn", "-dn", "-max_muxing_queue_size", "2048"]
+        if start_sec > 0:
+            cmd += ["-output_ts_offset", f"{start_sec:.3f}"]
+        cmd += ["-f", "hls", "-hls_time", str(SEGMENT_TIME),
+                "-start_number", str(seg_idx),
                 "-hls_playlist_type", "event",
                 "-hls_flags", "independent_segments",
                 "-hls_segment_filename", str(self.dir / "seg_%05d.ts"),
@@ -890,34 +901,107 @@ class HLSJob:
     def start(self):
         self.dir.mkdir(parents=True, exist_ok=True)
         label = {"copy": "remux", "transcode": f"transcode ({ENCODER_NAME})"}[self.mode]
-        log(f"stream  {label:<26} {self.rel}  @{self.start_time}s")
+        log(f"stream  {label:<26} {self.rel}  @{self.start_time:.1f}s (seg {self.init_seg})")
+        with self.lock:
+            try:
+                self.proc = subprocess.Popen(
+                    self.build_cmd(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                    creationflags=NO_WINDOW,
+                )
+            except Exception as e:
+                self.error = str(e)
+                log(f"Could not start ffmpeg: {e}")
+                return
+            proc_ref = self.proc
+            threading.Thread(target=self._watch, args=(proc_ref,), daemon=True).start()
+
+    def _watch(self, proc):
+        rc = -1
+        try:
+            for line in proc.stderr:
+                self.stderr_tail.append(line.rstrip())
+            rc = proc.wait()
+        except Exception as e:
+            self.stderr_tail.append(str(e))
+        if self.stopped or proc != self.proc:
+            return
+        if rc == 0:
+            self.finished = True
+        elif rc not in (-9, 15):
+            self.error = " | ".join(list(self.stderr_tail)[-4:]) or f"ffmpeg exited with code {rc}"
+            log(f"ffmpeg error ({self.rel}): {self.error}")
+
+    def generate_vod_manifest(self):
+        duration = self.total_duration
+        if duration <= 0:
+            return None
+        target_dur = int(math.ceil(SEGMENT_TIME))
+        num_segs = max(1, int(math.ceil(duration / SEGMENT_TIME)))
+
+        lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:6",
+            f"#EXT-X-TARGETDURATION:{target_dur}",
+            "#EXT-X-MEDIA-SEQUENCE:0",
+            "#EXT-X-PLAYLIST-TYPE:VOD",
+        ]
+        if self.start_time > 0:
+            lines.append(f"#EXT-X-START:TIME-OFFSET={self.start_time:.3f},PRECISE=YES")
+
+        rem = duration
+        for i in range(num_segs):
+            seg_dur = min(SEGMENT_TIME, rem) if rem > 0 else SEGMENT_TIME
+            lines.append(f"#EXTINF:{seg_dur:.6f},")
+            lines.append(f"seg_{i:05d}.ts")
+            rem -= seg_dur
+
+        lines.append("#EXT-X-ENDLIST\n")
+        return "\n".join(lines).encode("utf-8")
+
+    def max_seg_on_disk(self):
+        try:
+            m = -1
+            for e in os.scandir(self.dir):
+                if e.name.startswith("seg_") and e.name.endswith(".ts"):
+                    try:
+                        idx = int(e.name[4:9])
+                        if idx > m:
+                            m = idx
+                    except ValueError:
+                        pass
+            return m
+        except OSError:
+            return -1
+
+    def seek_to_segment(self, target_idx):
+        if self.stopped:
+            return
+        target_sec = max(0.0, target_idx * SEGMENT_TIME)
+        log(f"stream  seek to seg {target_idx} (@{target_sec:.1f}s) for {self.rel}")
+        p = self.proc
+        self.proc = None
+        if p and p.poll() is None:
+            try:
+                p.kill()
+                p.wait(timeout=2)
+            except Exception:
+                pass
+        self.start_time = target_sec
+        self.init_seg = target_idx
+        self.finished = False
+        self.error = None
         try:
             self.proc = subprocess.Popen(
                 self.build_cmd(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
                 creationflags=NO_WINDOW,
             )
+            proc_ref = self.proc
+            threading.Thread(target=self._watch, args=(proc_ref,), daemon=True).start()
         except Exception as e:
             self.error = str(e)
-            log(f"Could not start ffmpeg: {e}")
-            return
-        threading.Thread(target=self._watch, daemon=True).start()
-
-    def _watch(self):
-        rc = -1
-        try:
-            for line in self.proc.stderr:
-                self.stderr_tail.append(line.rstrip())
-            rc = self.proc.wait()
-        except Exception as e:
-            self.stderr_tail.append(str(e))
-        if self.stopped:
-            return
-        if rc == 0:
-            self.finished = True
-        else:
-            self.error = " | ".join(list(self.stderr_tail)[-4:]) or f"ffmpeg exited with code {rc}"
-            log(f"ffmpeg error ({self.rel}): {self.error}")
+            log(f"Could not seek ffmpeg: {e}")
 
     # ---- lifecycle ------------------------------------------------------
     def touch(self):
@@ -933,12 +1017,13 @@ class HLSJob:
         if self.stopped:
             return
         self.stopped = True
-        p = self.proc
-        if p and p.poll() is None:
-            try:
-                p.kill()
-            except Exception:
-                pass
+        with self.lock:
+            p = self.proc
+            if p and p.poll() is None:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
         threading.Thread(target=self._cleanup, daemon=True).start()
 
     def _cleanup(self):
@@ -1553,12 +1638,6 @@ class Handler(BaseHTTPRequestHandler):
         job = start_job(sid, seq, movie, rel_of(movie), audio, start, meta)
         if job is None:
             return self.send_json({"status": "stale"})
-        # give ffmpeg a moment: report an immediate failure now instead of letting the player retry for a minute
-        deadline = time.time() + 1.5
-        while time.time() < deadline and not job.error:
-            if job.playlist.exists():
-                break
-            time.sleep(0.03)
         if job.error:
             stop_session(sid)
             return self.send_json({"status": "error", "error": "ffmpeg could not process this file. " + http_msg(job.error)[:120]})
@@ -1575,31 +1654,72 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(404, "Stream expired")
         job.touch()
         name = parts[3]
-        fp = job.dir / name
 
         if name == "index.m3u8":
-            deadline = time.time() + 45
+            vod = job.generate_vod_manifest()
+            if vod:
+                return self.send_bytes(vod, "application/vnd.apple.mpegurl", cache="no-store")
+            deadline = time.time() + 35
+            fp = job.playlist
             while time.time() < deadline:
                 if job.error:
                     return self.send_error(500, http_msg(job.error))
                 if job.stopped:
                     return self.send_error(404, "Stream expired")
                 try:
-                    data = fp.read_bytes()
-                    if data.startswith(b"#EXTM3U") and b"#EXTINF" in data and data.endswith(b"\n"):
-                        return self.send_bytes(data, "application/vnd.apple.mpegurl", cache="no-store")
+                    if fp.exists():
+                        data = fp.read_bytes()
+                        if data.startswith(b"#EXTM3U") and b"#EXTINF" in data:
+                            return self.send_bytes(data, "application/vnd.apple.mpegurl", cache="no-store")
                 except OSError:
                     pass
                 time.sleep(0.04)
             return self.send_error(504, "Stream is taking too long to start")
 
-        job.last_req = int(name[4:9])
-        if not fp.exists():
-            wait_deadline = time.time() + 1.5
-            while time.time() < wait_deadline and not fp.exists():
-                time.sleep(0.05)
-            if not fp.exists():
-                return self.send_error(404, "Segment not found")
+        # Handle segment request (seg_XXXXX.ts)
+        req_idx = int(name[4:9])
+        job.last_req = req_idx
+        fp = job.dir / name
+
+        # Check if requested segment is outside our current encode window and needs a seek
+        if not fp.exists() or fp.stat().st_size == 0:
+            with job.lock:
+                max_seg = job.max_seg_on_disk()
+                if req_idx < job.init_seg or req_idx > max(job.init_seg, max_seg) + 15:
+                    job.seek_to_segment(req_idx)
+            fp = job.dir / name
+
+        deadline = time.time() + 35
+        while time.time() < deadline:
+            if job.stopped:
+                return self.send_error(404, "Stream expired")
+            if job.error:
+                return self.send_error(500, http_msg(job.error))
+            if fp.exists():
+                try:
+                    sz = fp.stat().st_size
+                    if sz > 0:
+                        # Check if next segment exists or job finished
+                        next_fp = job.dir / f"seg_{req_idx + 1:05d}.ts"
+                        if next_fp.exists() or job.finished:
+                            break
+                        # Check if ffmpeg wrote segment entry to playlist
+                        if job.playlist.exists():
+                            try:
+                                if name.encode("utf-8") in job.playlist.read_bytes():
+                                    break
+                            except OSError:
+                                pass
+                        time.sleep(0.05)
+                        if fp.exists() and fp.stat().st_size == sz:
+                            break
+                except OSError:
+                    pass
+            time.sleep(0.04)
+
+        if not fp.exists() or fp.stat().st_size == 0:
+            return self.send_error(404, "Segment not found")
+
         self.serve_file(fp, "video/mp2t", cache="no-store")
 
 
@@ -3063,6 +3183,7 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 svg{display:block;flex:none}
 
 .app{position:fixed;inset:0;background:#000;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:none}
+#app:fullscreen,#app:-webkit-full-screen{width:100vw;height:100vh;position:fixed;inset:0;background:#000;z-index:99999}
 video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;background:#000;transition:filter .12s}
 #gest{position:absolute;inset:0;z-index:5;touch-action:none}
 
@@ -3162,6 +3283,15 @@ input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;bac
 .next-btn{background:#fff;color:#000;font-weight:700;font-size:13.5px;padding:8px 16px;border-radius:8px;display:inline-flex;align-items:center;gap:6px}
 .next-cancel{color:var(--muted);font-size:13px;padding:6px 8px}
 
+.edge-hud{position:absolute;top:50%;transform:translateY(-50%);z-index:45;display:flex;flex-direction:column;align-items:center;gap:10px;padding:16px 10px;background:rgba(18,18,22,0.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.14);border-radius:24px;box-shadow:0 8px 32px rgba(0,0,0,0.6);opacity:0;pointer-events:none;transition:opacity .2s,transform .2s var(--ease)}
+.edge-hud.left{left:24px}
+.edge-hud.right{right:24px}
+.edge-hud.show{opacity:1;pointer-events:none}
+.edge-hud .eh-icon{color:var(--accent);display:flex;align-items:center;justify-content:center}
+.edge-hud .eh-track{width:6px;height:130px;background:rgba(255,255,255,0.18);border-radius:4px;overflow:hidden;position:relative;display:flex;flex-direction:column;justify-content:flex-end}
+.edge-hud .eh-fill{width:100%;height:100%;background:linear-gradient(to top,var(--accent),#ff8a65);border-radius:4px;transition:height .08s ease-out}
+.edge-hud .eh-val{font-size:12px;font-weight:700;color:#fff;font-variant-numeric:tabular-nums}
+
 .err{position:absolute;inset:0;background:#000000e6;z-index:50;display:none;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center}
 .err.show{display:flex}
 .err h3{font-size:22px;font-weight:700}
@@ -3185,6 +3315,16 @@ input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;bac
   <div class="flash" id="flash"></div>
   <div class="rip l" id="ripL"><span data-i="chevL" data-s="30"></span><span id="ripLt"></span></div>
   <div class="rip r" id="ripR"><span data-i="chevR" data-s="30"></span><span id="ripRt"></span></div>
+  <div class="edge-hud left" id="edgeHudLeft">
+    <div class="eh-icon" id="ehBriIcon"><span data-i="bright" data-s="26"></span></div>
+    <div class="eh-track"><div class="eh-fill" id="ehBriFill"></div></div>
+    <div class="eh-val" id="ehBriVal">100%</div>
+  </div>
+  <div class="edge-hud right" id="edgeHudRight">
+    <div class="eh-icon" id="ehVolIcon"><span data-i="volHi" data-s="26"></span></div>
+    <div class="eh-track"><div class="eh-fill" id="ehVolFill"></div></div>
+    <div class="eh-val" id="ehVolVal">100%</div>
+  </div>
   <div class="hud" id="hud"><span data-hi></span><div class="t"><i></i></div><span class="val"></span></div>
   <div class="osd" id="osd"></div>
   <div class="spin" id="spin"><i></i><span id="spinT">Starting...</span></div>
@@ -3309,7 +3449,10 @@ if (CFG.nextEpisode) {
 
 let DUR = CFG.duration || 0;
 const dur = () => DUR || (isFinite(v.duration) && v.duration > 0 ? v.duration : 0);
-const nowTime = () => freeze !== null ? freeze : (mode === "direct" ? v.currentTime : streamStart + (v.currentTime || 0));
+const nowTime = () => {
+  if (freeze !== null) return freeze;
+  return v.currentTime || 0;
+};
 
 function fmt(sec) {
   sec = Math.max(0, Math.floor(sec || 0));
@@ -3371,16 +3514,40 @@ async function startStream(startSec, opts = {}) {
           v.addEventListener("loadedmetadata", onMeta, { once: true });
         }
       }
-      await tryPlay();
+      v.muted = muted;
+      await tryPlay(!!opts.isInitial);
     } else {
       if (v.canPlayType("application/vnd.apple.mpegurl")) {
+        // Native HLS (Safari on iPad / iOS / Mac)
+        // With VOD playlist, Apple AVPlayer maps to the full movie duration (2:25:00)
+        // #EXT-X-START:TIME-OFFSET in the playlist automatically cues playback to startSec.
         v.src = d.url;
-        await tryPlay();
+        if (startSec > 0) {
+          const onMeta = () => {
+            v.removeEventListener("loadedmetadata", onMeta);
+            if (Math.abs((v.currentTime || 0) - startSec) > 2) {
+              try { v.currentTime = startSec; } catch (_) {}
+            }
+          };
+          v.addEventListener("loadedmetadata", onMeta, { once: true });
+        }
+        v.muted = muted;
+        await tryPlay(!!opts.isInitial);
       } else if (typeof Hls !== "undefined" && Hls.isSupported()) {
-        hls = new Hls({ manifestLoadingMaxRetry: 10, levelLoadingMaxRetry: 8, fragLoadingMaxRetry: 8, enableWorker: true });
+        hls = new Hls({
+          startPosition: startSec > 0 ? startSec : -1,
+          manifestLoadingMaxRetry: 10,
+          levelLoadingMaxRetry: 8,
+          fragLoadingMaxRetry: 8,
+          fragLoadingTimeOut: 30000,
+          enableWorker: true
+        });
         hls.loadSource(d.url);
         hls.attachMedia(v);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => tryPlay());
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          v.muted = muted;
+          tryPlay(!!opts.isInitial);
+        });
         hls.on(Hls.Events.ERROR, (e, data) => { if (data.fatal) handleFatal(); });
       }
     }
@@ -3396,34 +3563,76 @@ async function startStream(startSec, opts = {}) {
 
 function handleFatal() {
   if (recoveries++ < 3) {
-    startStream(nowTime(), { msg: "Reconnecting stream...", forceHls: true });
+    startStream(nowTime(), { msg: "Reconnecting stream...", forceHls: true, isInitial: false });
   } else {
     $("#errMsg").textContent = "Stream connection lost.";
     $("#err").classList.add("show");
   }
 }
 
-async function tryPlay() {
+async function tryPlay(isInitial = false) {
   try {
+    v.muted = muted;
     await v.play();
-    setSvg($("#bPlay span"), "pause", 28);
-    setSvg($("#big span"), "pause", 34);
   } catch (e) {
-    v.muted = true;
-    v.play().then(() => toast("Muted playback (tap to unmute)")).catch(() => {});
+    if (isInitial) {
+      v.muted = true;
+      v.play().then(() => toast("Muted playback (tap to unmute)")).catch(() => {});
+    } else {
+      v.muted = muted;
+      setTimeout(() => {
+        v.muted = muted;
+        v.play().catch(() => {});
+      }, 100);
+    }
   }
 }
+
+function updatePlayPauseIcons() {
+  const isPaused = v.paused;
+  const ic = isPaused ? "play" : "pause";
+  setSvg($("#bPlay span"), ic, 28);
+  setSvg($("#big span"), ic, 34);
+}
+v.addEventListener("play", updatePlayPauseIcons);
+v.addEventListener("pause", updatePlayPauseIcons);
+v.addEventListener("playing", updatePlayPauseIcons);
+let stallWatchdog = null;
+v.addEventListener("waiting", () => {
+  setLoading(true, "Buffering...");
+  clearTimeout(stallWatchdog);
+  stallWatchdog = setTimeout(() => {
+    if (!v.paused && !switching) {
+      console.warn("Playback stalled in waiting state, recovering stream...");
+      startStream(nowTime(), { msg: "Resuming stream...", forceHls: true, isInitial: false });
+    }
+  }, 7000);
+});
+v.addEventListener("canplay", () => {
+  setLoading(false);
+  clearTimeout(stallWatchdog);
+  freeze = null;
+  pendingSeekTime = null;
+  switching = false;
+  tick();
+  updatePlayPauseIcons();
+});
+v.addEventListener("playing", () => {
+  setLoading(false);
+  clearTimeout(stallWatchdog);
+  freeze = null;
+  pendingSeekTime = null;
+  switching = false;
+  tick();
+  updatePlayPauseIcons();
+});
 
 function togglePlay() {
   if (locked) return;
   if (v.paused) {
-    v.play();
-    setSvg($("#bPlay span"), "pause", 28);
-    setSvg($("#big span"), "pause", 34);
+    v.play().catch(() => {});
   } else {
     v.pause();
-    setSvg($("#bPlay span"), "play", 28);
-    setSvg($("#big span"), "play", 34);
   }
   $("#big").classList.add("show");
   setTimeout(() => $("#big").classList.remove("show"), 350);
@@ -3446,12 +3655,13 @@ function tick() {
   }
   // Buffer bar
   if (v.buffered && v.buffered.length > 0 && d > 0) {
-    const bEnd = mode === "direct" ? v.buffered.end(v.buffered.length - 1) : streamStart + v.buffered.end(v.buffered.length - 1);
+    const bEnd = v.buffered.end(v.buffered.length - 1);
     $("#buf").style.width = clamp((bEnd / d) * 100, 0, 100) + "%";
   }
 
   // Next Episode auto-prompt
   checkNextEpisodePrompt(t, d);
+  updateMediaSession();
 }
 v.addEventListener("timeupdate", tick);
 v.addEventListener("progress", tick);
@@ -3521,11 +3731,16 @@ $("#btnCancelNext").addEventListener("click", () => {
 });
 
 /* ---------- seeking & scrubbing ---------- */
+let seekDebounceTimer = null;
+let pendingSeekTime = null;
+
 function locallySeekable(t) {
   if (mode === "direct") return true;
-  const lt = t - streamStart; if (lt < 0) return false;
-  const s = v.seekable;
-  for (let i = 0; s && i < s.length; i++) if (lt >= s.start(i) - .1 && lt <= s.end(i) - 1) return true;
+  const b = v.buffered;
+  if (!b || b.length === 0) return false;
+  for (let i = 0; i < b.length; i++) {
+    if (t >= b.start(i) && t <= b.end(i) - 0.5) return true;
+  }
   return false;
 }
 
@@ -3533,23 +3748,63 @@ function seekTo(t) {
   if (locked) return;
   const d = dur();
   t = clamp(t, 0, d > 1 ? d - .5 : 1e9);
-  if (locallySeekable(t)) {
-    v.currentTime = mode === "direct" ? t : t - streamStart;
-    freeze = null;
-    tick();
-  } else {
-    startStream(t, { msg: `Seeking to ${fmt(t)}...` });
+  pendingSeekTime = t;
+  freeze = t;
+  v.muted = muted;
+
+  // Immediate UI update so the slider and time jump instantly on every click
+  if (d > 0) {
+    const pct = clamp((t / d) * 100, 0, 100);
+    $("#prog").style.width = pct + "%";
+    $("#knob").style.left = pct + "%";
+    $("#mini").style.width = pct + "%";
+    $("#tCur").textContent = fmt(t);
   }
+
+  clearTimeout(seekDebounceTimer);
+  seekDebounceTimer = setTimeout(() => {
+    executeSeek(pendingSeekTime !== null ? pendingSeekTime : t);
+  }, 120);
 }
+
+let seekFallbackTimer = null;
+function executeSeek(t) {
+  freeze = t;
+  clearTimeout(seekFallbackTimer);
+  try {
+    v.currentTime = t;
+    if (v.paused) v.play().catch(() => {});
+  } catch (_) {}
+
+  // Fallback: If native seek does not take effect within 2.5s, reload stream
+  seekFallbackTimer = setTimeout(() => {
+    if (Math.abs((v.currentTime || 0) - t) > 3) {
+      console.warn("Direct seek timed out, reloading stream at", t);
+      startStream(t, { msg: `Seeking to ${fmt(t)}...`, isInitial: false });
+    }
+  }, 2500);
+}
+
+v.addEventListener("seeked", () => {
+  clearTimeout(seekFallbackTimer);
+  freeze = null;
+  pendingSeekTime = null;
+  tick();
+  updatePlayPauseIcons();
+  updateMediaSession();
+});
 
 function skip(sec) {
   if (locked) return;
-  const target = clamp(nowTime() + sec, 0, dur() > 0 ? dur() - .5 : 1e9);
+  // If multiple clicks happen in rapid succession, stack onto the pending seek target!
+  const baseTime = pendingSeekTime !== null ? pendingSeekTime : nowTime();
+  const target = clamp(baseTime + sec, 0, dur() > 0 ? dur() - .5 : 1e9);
   const el = sec < 0 ? $("#ripL") : $("#ripR");
   const tx = sec < 0 ? $("#ripLt") : $("#ripRt");
   tx.textContent = `${sec > 0 ? "+" : ""}${sec}s`;
   el.classList.add("show");
-  setTimeout(() => el.classList.remove("show"), 550);
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove("show"), 550);
   seekTo(target);
 }
 $("#bBack").addEventListener("click", () => skip(-10));
@@ -3601,7 +3856,6 @@ tl.addEventListener("pointercancel", e => {
   tl.classList.remove("drag");
   try { tl.releasePointerCapture(e.pointerId); } catch (_) {}
   $("#tip").style.opacity = "0";
-  seekTo(scrubT);
 });
 tl.addEventListener("pointerleave", () => { if (!scrubbing) $("#tip").style.opacity = "0"; });
 
@@ -3630,43 +3884,196 @@ tl.addEventListener("touchend", e => {
   showControls();
 }, { passive: false });
 
-/* ---------- volume & boost ---------- */
+/* ---------- Media Session API (iOS lock screen & native timeline) ---------- */
+let lastMediaSessionTime = 0;
+function updateMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  const now = Date.now();
+  if (now - lastMediaSessionTime < 1000) return;
+  lastMediaSessionTime = now;
+  const d = dur();
+  const t = clamp(nowTime(), 0, d > 0 ? d : 1e9);
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: CFG.title || "Cinema",
+      artist: CFG.year ? `${CFG.year} • 1080p` : "Cinema Server",
+      album: "Cinema Stream"
+    });
+    if (d > 0 && isFinite(d) && isFinite(t)) {
+      navigator.mediaSession.setPositionState({
+        duration: Math.max(1, d),
+        playbackRate: v.playbackRate || 1,
+        position: t
+      });
+    }
+  } catch (_) {}
+}
+
+if ('mediaSession' in navigator) {
+  try {
+    navigator.mediaSession.setActionHandler('play', () => { if (v.paused) v.play().catch(() => {}); });
+    navigator.mediaSession.setActionHandler('pause', () => { if (!v.paused) v.pause(); });
+    navigator.mediaSession.setActionHandler('seekbackward', (d) => skip(-(d.seekOffset || 10)));
+    navigator.mediaSession.setActionHandler('seekforward', (d) => skip(d.seekOffset || 10));
+    navigator.mediaSession.setActionHandler('seekto', (d) => { if (d.seekTime !== undefined) seekTo(d.seekTime); });
+  } catch (_) {}
+}
+
+/* ---------- volume, brightness & HUD ---------- */
 let vol = 1.0, muted = false;
-function setVolume(val) {
+let hudTimer = null;
+let edgeHudTimers = { left: null, right: null };
+
+function showEdgeHud(side, pct, iconSvg) {
+  const el = side === "left" ? $("#edgeHudLeft") : $("#edgeHudRight");
+  const fill = side === "left" ? $("#ehBriFill") : $("#ehVolFill");
+  const val = side === "left" ? $("#ehBriVal") : $("#ehVolVal");
+  const icon = side === "left" ? $("#ehBriIcon") : $("#ehVolIcon");
+  if (!el || !fill || !val) return;
+
+  if (icon && iconSvg) icon.innerHTML = iconSvg;
+  fill.style.height = clamp(pct, 0, 100) + "%";
+  val.textContent = `${pct}%`;
+  el.classList.add("show");
+
+  clearTimeout(edgeHudTimers[side]);
+  edgeHudTimers[side] = setTimeout(() => el.classList.remove("show"), 850);
+}
+
+function showHud(type, valText, pct, iconSvg) {
+  const hud = $("#hud");
+  if (!hud) return;
+  const iconSpan = hud.querySelector("[data-hi]");
+  const barFill = hud.querySelector(".t i");
+  const valSpan = hud.querySelector(".val");
+  
+  if (iconSpan && iconSvg) iconSpan.innerHTML = iconSvg;
+  if (barFill) barFill.style.width = clamp(pct, 0, 100) + "%";
+  if (valSpan) valSpan.textContent = valText;
+  
+  hud.classList.add("show");
+  clearTimeout(hudTimer);
+  hudTimer = setTimeout(() => hud.classList.remove("show"), 850);
+}
+
+function setVolume(val, showHUD = false, isGesture = false) {
   vol = clamp(val, 0, 1);
   v.volume = vol;
+  if (vol > 0 && muted) muted = false;
+  v.muted = muted;
   $("#vol").value = vol;
   $("#vol").style.setProperty("--p", (vol * 100) + "%");
   const icName = vol === 0 || muted ? "volMute" : (vol < 0.5 ? "volLow" : "volHi");
   setSvg($("#volIc"), icName, 22);
+
+  const pct = muted ? 0 : Math.round(vol * 100);
+  if (isGesture) {
+    const svgHtml = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[icName]}</svg>`;
+    showEdgeHud("right", pct, svgHtml);
+  } else if (showHUD) {
+    const svgHtml = `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[icName]}</svg>`;
+    showHud("volume", `${pct}%`, pct, svgHtml);
+  }
 }
-$("#vol").addEventListener("input", e => setVolume(parseFloat(e.target.value)));
+$("#vol").addEventListener("input", e => setVolume(parseFloat(e.target.value), true));
 $("#bMute").addEventListener("click", () => {
   muted = !muted;
   v.muted = muted;
-  setVolume(muted ? 0 : vol || 1);
+  setVolume(muted ? 0 : (vol > 0 ? vol : 1.0), true);
 });
 
-/* ---------- gestures (iPad & touch) ---------- */
-let touchY = 0;
+v.addEventListener("volumechange", () => {
+  if (v.muted && !muted && !switching) {
+    v.muted = false;
+  }
+});
+
+let bright = 1.0;
+let curContrast = 1.0;
+let curSaturation = 1.0;
+
+function setBrightness(val, showHUD = false, isGesture = false) {
+  bright = clamp(val, 0.2, 1.8);
+  applyVideoFilters();
+  const displayPct = Math.round(((bright - 0.2) / 1.6) * 100);
+  if (isGesture) {
+    const svgHtml = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS.bright}</svg>`;
+    showEdgeHud("left", displayPct, svgHtml);
+  } else if (showHUD) {
+    const svgHtml = `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS.bright}</svg>`;
+    showHud("brightness", `${displayPct}%`, displayPct, svgHtml);
+  }
+}
+
+function applyVideoFilters() {
+  v.style.filter = `brightness(${bright.toFixed(2)}) contrast(${curContrast.toFixed(2)}) saturate(${curSaturation.toFixed(2)})`;
+}
+
+/* ---------- gestures (Left Edge: Brightness, Right Edge: Volume) ---------- */
+let touchStartX = 0, touchStartY = 0, touchMode = null;
+let touchMoved = false;
+
 $("#gest").addEventListener("touchstart", e => {
-  if (e.touches.length === 1) touchY = e.touches[0].clientY;
+  if (e.touches.length === 1) {
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    touchMoved = false;
+    const isLeft = touchStartX < window.innerWidth * 0.5;
+    touchMode = isLeft ? "brightness" : "volume";
+  }
 }, { passive: true });
+
 $("#gest").addEventListener("touchmove", e => {
   if (e.touches.length === 1 && !locked) {
-    const diff = touchY - e.touches[0].clientY;
-    touchY = e.touches[0].clientY;
-    setVolume(vol + (diff / 300));
+    const curX = e.touches[0].clientX;
+    const curY = e.touches[0].clientY;
+    const diff = touchStartY - curY;
+    if (Math.abs(diff) > 4) touchMoved = true;
+    touchStartY = curY;
+    
+    // Sensitivity: ~300px vertical drag spans 100%
+    const delta = diff / 300;
+
+    if (touchMode === "brightness") {
+      setBrightness(bright + delta * 1.6, false, true);
+    } else if (touchMode === "volume") {
+      setVolume(vol + delta, false, true);
+    }
   }
 }, { passive: true });
 
 let lastTap = 0;
-$("#gest").addEventListener("click", () => {
-  const now = Date.now();
-  if (now - lastTap < 300) { togglePlay(); }
-  else { showControls(); }
-  lastTap = now;
+$("#gest").addEventListener("touchend", e => {
+  if (!touchMoved) {
+    const now = Date.now();
+    if (now - lastTap < 300) { togglePlay(); }
+    else { showControls(); }
+    lastTap = now;
+  }
+}, { passive: true });
+
+// Mouse drag support for desktop
+let mouseDragging = false, mouseMode = null, mouseStartY = 0;
+$("#gest").addEventListener("mousedown", e => {
+  if (e.button === 0 && !locked) {
+    mouseDragging = true;
+    mouseStartY = e.clientY;
+    mouseMode = e.clientX < window.innerWidth * 0.5 ? "brightness" : "volume";
+  }
 });
+window.addEventListener("mousemove", e => {
+  if (mouseDragging && !locked) {
+    const diff = mouseStartY - e.clientY;
+    mouseStartY = e.clientY;
+    const delta = diff / 300;
+    if (mouseMode === "brightness") {
+      setBrightness(bright + delta * 1.6, false, true);
+    } else if (mouseMode === "volume") {
+      setVolume(vol + delta, false, true);
+    }
+  }
+});
+window.addEventListener("mouseup", () => { mouseDragging = false; });
 
 /* ---------- popovers & settings ---------- */
 const pops = ["popAudio", "popSpeed", "popPic"];
@@ -3720,15 +4127,106 @@ $("#bPic").addEventListener("click", e => {
   if (!open) $("#popPic").classList.add("open");
 });
 
+// Picture adjustments (Sliders & Reset)
+$("#fxB").addEventListener("input", e => {
+  const p = parseInt(e.target.value, 10);
+  $("#fxBv").textContent = p + "%";
+  bright = p / 100;
+  applyVideoFilters();
+});
+$("#fxC").addEventListener("input", e => {
+  const p = parseInt(e.target.value, 10);
+  $("#fxCv").textContent = p + "%";
+  curContrast = p / 100;
+  applyVideoFilters();
+});
+$("#fxS").addEventListener("input", e => {
+  const p = parseInt(e.target.value, 10);
+  $("#fxSv").textContent = p + "%";
+  curSaturation = p / 100;
+  applyVideoFilters();
+});
+$("#fxReset").addEventListener("click", () => {
+  bright = 1.0; curContrast = 1.0; curSaturation = 1.0;
+  $("#fxB").value = 100; $("#fxBv").textContent = "100%";
+  $("#fxC").value = 100; $("#fxCv").textContent = "100%";
+  $("#fxS").value = 100; $("#fxSv").textContent = "100%";
+  applyVideoFilters();
+  osd("Picture reset");
+});
+
+// Aspect Ratio selector
+const aspects = [
+  { label: "Fit", val: "contain" },
+  { label: "Fill", val: "cover" },
+  { label: "16:9", val: "16/9" },
+  { label: "4:3", val: "4/3" }
+];
+$("#aspectList").innerHTML = aspects.map((a, i) => `<button class="item ${i === 0 ? "on" : ""}" data-asp="${a.val}">${a.label}</button>`).join("");
+$("#aspectList").addEventListener("click", e => {
+  const b = e.target.closest("[data-asp]");
+  if (b) {
+    const asp = b.dataset.asp;
+    document.querySelectorAll("#aspectList .item").forEach(it => it.classList.toggle("on", it.dataset.asp === asp));
+    if (asp === "contain" || asp === "cover") {
+      v.style.objectFit = asp;
+      v.style.aspectRatio = "auto";
+    } else {
+      v.style.objectFit = "fill";
+      v.style.aspectRatio = asp;
+    }
+    closeAllPops();
+    osd(`Aspect: ${b.textContent}`);
+  }
+});
+
 document.addEventListener("click", e => {
   if (!e.target.closest(".pop") && !e.target.closest(".cb")) closeAllPops();
 });
 
 // Fullscreen & Lock
-$("#bFs").addEventListener("click", () => {
-  if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
-  else if (!document.fullscreenElement) $("#app").requestFullscreen().catch(() => {});
-  else document.exitFullscreen().catch(() => {});
+async function toggleFullscreen() {
+  const app = $("#app");
+  const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  if (isFs) {
+    if (document.exitFullscreen) await document.exitFullscreen().catch(() => {});
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+  } else {
+    // Prefer DOM element fullscreen so Cinema's custom UI, controls, and timeline stay active
+    if (app.requestFullscreen) {
+      try {
+        await app.requestFullscreen();
+        return;
+      } catch (_) {}
+    }
+    if (app.webkitRequestFullscreen) {
+      try {
+        app.webkitRequestFullscreen();
+        return;
+      } catch (_) {}
+    }
+    // Fallback to video fullscreen for devices like iPhone that restrict element fullscreen
+    if (v.webkitEnterFullscreen) {
+      v.webkitEnterFullscreen();
+    }
+  }
+}
+$("#bFs").addEventListener("click", toggleFullscreen);
+
+function onFsChange() {
+  const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  setSvg($("#bFs span"), isFs ? "restore" : "max", 24);
+  updatePlayPauseIcons();
+}
+document.addEventListener("fullscreenchange", onFsChange);
+document.addEventListener("webkitfullscreenchange", onFsChange);
+
+// When exiting native video fullscreen on iOS (WebKit automatically pauses the video)
+v.addEventListener("webkitendfullscreen", () => {
+  updatePlayPauseIcons();
+  setTimeout(() => {
+    v.play().then(() => updatePlayPauseIcons()).catch(() => updatePlayPauseIcons());
+  }, 100);
 });
 
 $("#bLock").addEventListener("click", () => {

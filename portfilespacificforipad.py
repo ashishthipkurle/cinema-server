@@ -823,33 +823,17 @@ def pick_video_mode(meta, start_time):
 
 
 # ============================================================
-# PROCESS CONTROL (pause / resume ffmpeg without killing it)
+# PROCESS CONTROL
 # ============================================================
 
-THROTTLE_OK = True
+# Note: Throttling FFmpeg via OS process suspension is disabled because
+# pausing FFmpeg stops HLS playlist updates, causing Safari / HLS.js
+# to run out of segments and freeze after ~2-3 minutes.
+THROTTLE_OK = False
 
 
 def set_process_paused(pid, pause):
-    if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        nt = ctypes.WinDLL("ntdll")
-        k32.OpenProcess.restype = wintypes.HANDLE
-        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        k32.CloseHandle.argtypes = [wintypes.HANDLE]
-        nt.NtSuspendProcess.argtypes = [wintypes.HANDLE]
-        nt.NtResumeProcess.argtypes = [wintypes.HANDLE]
-        handle = k32.OpenProcess(0x0800, False, pid)      # PROCESS_SUSPEND_RESUME
-        if not handle:
-            raise OSError("OpenProcess failed")
-        try:
-            (nt.NtSuspendProcess if pause else nt.NtResumeProcess)(handle)
-        finally:
-            k32.CloseHandle(handle)
-    else:
-        import signal
-        os.kill(pid, signal.SIGSTOP if pause else signal.SIGCONT)
+    pass
 
 
 # ============================================================
@@ -971,26 +955,10 @@ class HLSJob:
 
     def housekeeping(self, now):
         """Called every second. Returns True when the job should be removed."""
-        global THROTTLE_OK
         if self.stopped:
             return True
         if now - self.last_access > IDLE_TIMEOUT:
             return True
-        p = self.proc
-        if not (THROTTLE_OK and p and p.poll() is None):
-            return False
-        limit = max(8, BUFFER_AHEAD_SECONDS // SEGMENT_TIME)
-        ahead = self.count_segments() - self.last_req
-        try:
-            if not self.suspended and ahead > limit:
-                set_process_paused(p.pid, True)
-                self.suspended = True
-            elif self.suspended and ahead < limit * 0.6:
-                set_process_paused(p.pid, False)
-                self.suspended = False
-        except Exception as e:
-            THROTTLE_OK = False
-            log(f"Throttling disabled ({e})")
         return False
 
 
@@ -1627,7 +1595,11 @@ class Handler(BaseHTTPRequestHandler):
 
         job.last_req = int(name[4:9])
         if not fp.exists():
-            return self.send_error(404, "Segment not found")
+            wait_deadline = time.time() + 1.5
+            while time.time() < wait_deadline and not fp.exists():
+                time.sleep(0.05)
+            if not fp.exists():
+                return self.send_error(404, "Segment not found")
         self.serve_file(fp, "video/mp2t", cache="no-store")
 
 
